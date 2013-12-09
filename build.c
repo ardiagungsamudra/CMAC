@@ -2,6 +2,7 @@
 #include<stdio.h>
 #include<stdlib.h>
 #include"des.h"
+#include"aes.h"
 #include"padlock.h"
 #include"config.h"
 #include<math.h>
@@ -12,15 +13,33 @@
 #define R_128	0x87
 #define R_64	0x1B
 
+#define comment 1
+
+#define AES_128		128
+#define AES_196		196
+#define AES_256		256
+
 #define d_ERROR		0x00
 #define d_SUCCESS	0x01
 
-//unsigned char key[48 + 1] = "4CF15134A2850DD58A3D10BA80570D384CF15134A2850DD5";	//TWO KEY 
+unsigned char key[48 + 1] = "4CF15134A2850DD58A3D10BA80570D384CF15134A2850DD5";	//TWO KEY 
 //unsigned char key[48 + 1] = "8aa83bf8cbda10620bc1bf19fbb6cd58bc313d4a371ca8b5";	//THREE KEY
-unsigned char key[48 + 1] = "7EBBEA1BA4A399EF7EBBEA1BA4A399EF";
+//unsigned char key[48 + 1] = "B736960AFA41EED7B736960AFA41EED7";
 //unsigned char key[33] = "2b7e151628aed2a6abf7158809cf4f3c";
+//unsigned char key[33] = "0aaf803dd2a6252d851b69b9e4f63801";
+//unsigned char key[33] = "7ebbea1ba4a399ef7ebbea1ba4a399ef";		//CMAC INTEGRITY WRITE TDEA
+//unsigned char key[33] = "b736960afa41eed7b736960afa41eed7";		//CMAC FULLY ENCIPHERED READ TDEA
+//unsigned char key[33] = "0aaf803dd2a6252d851b69b9e4f63801";		//CMAC INTEGRITY WRITE AES
+
 unsigned char input[16 + 1] = "0000000000000000";
 //unsigned char input[33] = "6bc1bee22e409f96e93d7e117393172a";
+unsigned char const_Rb[16] = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x87
+};
+unsigned char const_Rb2[8] = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1B
+};
 
 static unsigned char achr2nib(char chr) { //convert hexadecimal character to nibble
 	switch (chr) {
@@ -188,41 +207,46 @@ void encryptDES_ECB(unsigned char *Key, int lenKey, unsigned char *plain, unsign
 	if(ret != 0) printf("Crypt Failed\n");
 }
 
-int encrypt_3DES(unsigned char *p_key_str, int len_p_key_str, unsigned char *p_src_str, unsigned char *p_iv_str, int p_len_src_str, unsigned char *output, int *len_output) {
-	int ret, src_len;
-	unsigned char src_str[100];
-	unsigned char iv_str[100];
-	unsigned char key_str[100];
-	des3_context ctx;
+void encryptAES_ECB(unsigned char *Key, int lenKey, unsigned char *plain, unsigned char *cipher) {
+	int ret, keySize;
+	aes_context ctx;
 
-	memset(src_str, 0x00, sizeof(src_str));
-	memset(iv_str, 0x00, sizeof(iv_str));
-	memset(key_str, 0x00, sizeof(key_str));
-
-	/* Initiate seeds or initiate vector */
-	memcpy(iv_str, p_iv_str, 8);					// -> initial seeds
-
-	/* copy all bytes master key */
-	memcpy(key_str, p_key_str, len_p_key_str);
-
-	/* prepare source to decrypt */
-	src_len = p_len_src_str;
-	memcpy(src_str, p_src_str, src_len);
-
-	if( len_p_key_str == 16 )				//means 2 keys
-		des3_set2key_enc( &ctx, key_str );
-	else if( len_p_key_str == 24 )			//means 3 keys
-	des3_set3key_enc( &ctx, key_str );
-
-	*len_output = src_len;
-	ret = des3_crypt_cbc( &ctx, DES_ENCRYPT, src_len, iv_str, src_str, output );
-	if( ret == 0 )
-		return d_SUCCESS;
-
-	return d_ERROR;
+	keySize = lenKey * 8;
+	ret = aes_setkey_enc( &ctx,  Key, keySize );
+	if(ret != 0) printf("Set Key 128 Failed\n");
+	ret = aes_crypt_ecb( &ctx, AES_ENCRYPT, plain, cipher);
 }
 
-void generateSubKey(unsigned char *Key, unsigned char METHOD, unsigned long long int *K1, unsigned long long int *K2) {
+void leftshift_onebit(unsigned char *input,unsigned char *output, int len){
+	int i;
+	unsigned char overflow = 0;
+
+	for ( i=len; i>=0; i-- ) {
+		output[i] = input[i] << 1;
+		output[i] |= overflow;
+		overflow = (input[i] & 0x80)?1:0;
+	}
+	
+	return;
+} 
+
+void xor_byte(unsigned char *a, unsigned char *b, unsigned char *out, int len) {
+    int i;
+    for (i=0;i<=len; i++)
+    {
+          out[i] = a[i] ^ b[i];
+    }
+}
+
+/***************************************************************
+* Generate subkey K1 and K2 from Key with AES or TDEA method
+* Key : key to be used as cipher
+* K1  : subkey K1
+* K2  : subkey K2
+* METHOD : AES_MODE or TDEA_MODE
+*
+*/
+void generateSubKey(unsigned char *Key, unsigned char METHOD, unsigned char *K1, unsigned char *K2) {
 	unsigned char iKey[128];
 	unsigned char iStr[24];
 	unsigned char cipher[256+1];
@@ -230,9 +254,8 @@ void generateSubKey(unsigned char *Key, unsigned char METHOD, unsigned long long
 	unsigned char K_1[64+1];
 	unsigned char K_2[64+1];
 	unsigned long long int ullint = 0x0;
+	unsigned char tmp2[16 + 1];
 	int ret, i, len, b;
-	des3_context ctx;
-	aes_context actx;
 	unsigned char tmp = 0x0;
 	long uL= 0x0;
 	
@@ -241,62 +264,91 @@ void generateSubKey(unsigned char *Key, unsigned char METHOD, unsigned long long
 	memset(cipher, 0x0, sizeof(cipher));
 	memset(K_1, 0x0, sizeof(K_1));
 	memset(K_2, 0x0, sizeof(K_2));
+	memset(tmp2, 0x0, sizeof(tmp2));
 
 	len = ahex2bin(iKey, Key, strlen(Key)); //printf("len iKey %d\n", strlen(key));
 
-#if 0
-	ret = aes_setkey_enc( &actx, iKey, 128);
-	if(ret != 0) {printf("AES SET KEY FAILED\n"); return;}
-
-	ret = aes_crypt_ecb(&actx, AES_ENCRYPT, iStr, cipher);
-	if(ret != 0) {printf("AES FAILED ENCRYPT\n"); return;}
-#endif
-
+	printf("len %d\n", len);
 	if(METHOD == TDEA_MODE) {
 		b = 8;	// for the TDEA algorithm, the bit length of the block 64 bits or 8 bytes
 		encryptDES_ECB(iKey, len, iStr, cipher);	// params iStr should've 0^8 = 0x00000000
 	} 
 	else if(METHOD == AES_MODE) {
 		b = 16; // for the AES algorithm, the bit length of the block 128 bits or 16 bytes 
-
+		encryptAES_ECB(iKey, len, iStr, cipher);
 	}
 
-	ullint = str2ullint(cipher, b);
-	ullint <<= 1;
+/*	ullint = str2ullint(cipher, b);
+	ullint <<= 1;*/
 
-	if(cipher[0] & 0x80) {	/* if the leftmost cipher's bit is 1 */
-		ullint ^= R_64;
-		*K1 = ullint;		
+	if((cipher[0] & 0x80) == 0) {	/* if the leftmost cipher's bit is 1 */
+		if(METHOD == TDEA_MODE) leftshift_onebit(cipher, K1, 7);
+		else leftshift_onebit(cipher, K1, 15);
+
 	}
 	else { /* the leftmost cipher's bit is 0 */
-		*K1 = ullint;
+		if(METHOD == TDEA_MODE) {
+			leftshift_onebit(cipher, tmp2, 7);
+			xor_byte(tmp2, const_Rb2, K1, 7);
+		} else {
+			leftshift_onebit(cipher, tmp2, 15);
+			xor_byte(tmp2, const_Rb, K1, 7);
+		}
 	}
-	ullint2str(ullint, K_1, b);
-/*	printf("K1 ");
-	for(i = 0; i < 8; i++) printf("%02x ", K_1[i]);
-	printf("\n");*/
 
-	if(K_1[0] & 0x80) {	/* if the leftmost K1's bit is 1 */
-		*K2 = (*K1 << 1) ^ R_64;
+	memset(tmp2, 0x0, sizeof(tmp2));
+	if( (K1[0] & 0x80) == 0) {	/* if the leftmost K1's bit is 1 */
+		if(METHOD == TDEA_MODE) leftshift_onebit(K1, K2, 7);
+		else leftshift_onebit(K1, K2, 15);
+
 	}
 	else {	/* the leftmost K1's bit is 0*/
-		*K2 = *K1 << 1;
-	}
+		if(METHOD == TDEA_MODE) {
+			leftshift_onebit(K1, tmp2, 7);
+			xor_byte(tmp2, const_Rb2, K2, 7);
+		} else {
+			leftshift_onebit(K1, tmp2, 15);
+			xor_byte(tmp2, const_Rb, K2, 15);
+		}
 
-	ullint2str(*K2, K_2, b);
-/*	printf("K2 ");
-	for(i = 0; i < 8; i++) printf("%02x ", K_2[i]);
-	printf("\n");*/
+	}
 }
 
-void DES3_CBCEnc(unsigned char *key, int lenkey, unsigned char *src, int lensrc, unsigned char *iv, unsigned char *K, unsigned char *output) {
+void AES_CIPHMAC(unsigned char *key, int lenkey, unsigned char *src, int lensrc, unsigned char *iv, unsigned char *K, unsigned char *output) {
+	int ret, keySize, i;
+	aes_context ctx;
+	unsigned char *ptmp;
+	unsigned char tmp[lensrc + 1];
+
+	memset(tmp, 0x0, sizeof(tmp));
+	memcpy(tmp, src, lensrc);
+	ptmp = tmp;
+	keySize = lenkey * 8;
+	ret = aes_setkey_enc(&ctx, key, keySize);
+	if(ret != 0) printf("Set Key %d Failed\n", keySize);
+
+	while(lensrc > 0) {
+		if(lensrc == 16) {
+			for(i = 0; i < 16; i++) ptmp[i] ^= K[i];
+		}
+		for(i = 0; i < 16; i++) output[i] = ptmp[i] ^ iv[i];
+
+		aes_crypt_ecb(&ctx, AES_ENCRYPT, output, output);
+		memcpy(iv, output, 16);
+		ptmp += 16;
+		output += 16;
+		lensrc -= 16;
+	}
+}
+
+void DES3_CIPHMAC(unsigned char *key, int lenkey, unsigned char *src, int lensrc, unsigned char *iv, unsigned char *K, unsigned char *output) {
         unsigned char buff[lensrc + 1];
         int i;
         unsigned char tmp[lensrc + 1];
 	unsigned char  *ptmp;
         des3_context ctx;
 
-        memset(tmp, 0x02, sizeof(tmp));
+        memset(tmp, 0x0, sizeof(tmp));
 
         if(lenkey == 16) des3_set2key_enc(&ctx, key);
         else if(lenkey == 24) des3_set3key_enc(&ctx, key);
@@ -306,91 +358,109 @@ void DES3_CBCEnc(unsigned char *key, int lenkey, unsigned char *src, int lensrc,
 
         while(lensrc > 0) { 
                if(lensrc == 8) {
-                        printf("K XOR\n");
-                        for(i = 0; i < 8; i++) {
-                                ptmp[i] ^= K[i]; printf("%02X ", ptmp[i]);}
-                }
-                for(i = 0; i < 8; i++) {
-                        output[i] = iv[i] ^ ptmp[i];
-                }
-		printf("OKE\n");
+                        for(i = 0; i < 8; i++)
+                                ptmp[i] ^= K[i]; 
+                }	
+               	for(i = 0; i < 8; i++)
+               	        output[i] = iv[i] ^ ptmp[i];
+                
                 des3_crypt_ecb(&ctx, output, output);
                 memcpy(iv, output, 8);
                 ptmp += 8;
                 output +=8;
                 lensrc -=8;
         }
-	printf("\n");
+
 }
 
+/*******************************************
+* Craete secuence binary format as string
+* len : length of binnary string
+* out : format binary as string
+* example : "1000"
+*
+*/
 void createSeqBytes(int len, unsigned char *out) {
         unsigned char buff[len + 1];
         buff[0] = '1';
         memset(&buff[1], 0x30, len-1);
         memcpy(out, buff, len +1);
 }
-
-void MACProcess(unsigned char *message, unsigned char METHODE, unsigned char *Key) {
+/*******************************************************
+* This function is used to calculate MAC
+* message : buffer to calculate 
+* METHODE : AES_MODE or TDEA_MODE
+* Key     : key to be used as cipher and generate subkeys
+* prmIv   : initial vector
+*
+*/
+void MACProcess(unsigned char *message, unsigned char METHODE, unsigned char *Key, unsigned char *prmIv) {
 	int len, n, ret, j, b, lenKey, lenOut, i, lensrc;
 	float fn, Mlen;
 	unsigned long long int K1, K2 = 0x0;
-	unsigned long long int fm = 0x0;	// last block message
-	unsigned long long int fxm = 0x0;	// last block message xor with subkey
 	unsigned char binMsg[256];
 	unsigned char binKey[128];
 	unsigned char Mn[8 + 1];
-	unsigned char iv[8 + 1];
-	unsigned char output[64];// = {0x80,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0};
+	unsigned char output[64];
 	unsigned char tmp[256];
-	unsigned char K_1[8+1];
-	unsigned char K_2[8+1];
-	des3_context ctx;
+	unsigned char K_1[16+1];
+	unsigned char K_2[16+1];
 
 	memset(output, 0x0, sizeof(output));
-	memset(iv, 0x0, sizeof(iv));
 	memset(binMsg, 0x0, sizeof(binMsg));
 	memset(Mn, 0x0, sizeof(Mn));
 	memset(tmp, 0x0, sizeof(tmp));
-
-	lensrc = ahex2bin(binMsg, message, strlen(message));
 	
+	lensrc = ahex2bin(binMsg, message, strlen(message));
+	printf("lensrc %d\n", lensrc);
 	if(METHODE == TDEA_MODE) b = 64;	// for the TDEA algorithm, the bit length of the block 64 bits or 8 bytes
 	else b = 128;	// for the AES algorithm, the bit length of the block 128 bits or 16 bytes
 
-	generateSubKey(Key, METHODE, &K1, &K2);
-	ullint2str(K1, K_1, 8);
-	ullint2str(K2, K_2, 8);	
+	generateSubKey(Key, METHODE, K_1, K_2);
+	
 
 	Mlen = lensrc * 8;
 
 	lenKey = ahex2bin(binKey, Key, strlen(Key));
 #if 1
-	if(((int)Mlen % b) == 0) {
-		DES3_CBCEnc(binKey, lenKey, binMsg, lensrc, iv, K_1, output);
+	if( ( ((int)Mlen % b ) == 0) && Mlen > 0) {
+		if(METHODE == TDEA_MODE)
+			DES3_CIPHMAC(binKey, lenKey, binMsg, lensrc, prmIv, K_1, output);
+		else AES_CIPHMAC(binKey, lenKey, binMsg, lensrc, prmIv, K_1, output); 
 	} 
 	else {
-		fn = Mlen / b;
-		fn = ceil(fn);
-		n = (int) fn;
-		printf("n = %d\n", n);
-		j = n*b - Mlen - 1;
+                if(Mlen == 0)
+                    j = b;
+                else {
+			fn = Mlen / b;
+			fn = ceil(fn);
+			n = (int) fn;
+			printf("n = %d\n", n);
+			j = n*b - Mlen - 1;
+		}              
 		createSeqBytes(j, tmp);
+                printf("j %d, tmp %s \n", j, tmp);
 		len = strbin2strhex(tmp, output);
 //		len = 12;
 		printf("j %d, n %d, b %d, Mlen %f, fn %f, len %d\n", j, n, b, Mlen, fn, len);
 		memcpy(&binMsg[lensrc], output, len);
 		lensrc += len;
 		memset(output, 0x0, sizeof(output));
-		DES3_CBCEnc(binKey, lenKey, binMsg, lensrc, iv, K_2, output);
+		if(METHODE == TDEA_MODE) DES3_CIPHMAC(binKey, lenKey, binMsg, lensrc, prmIv, K_2, output);
+		else AES_CIPHMAC(binKey, lenKey, binMsg, lensrc, prmIv, K_2, output);
 	}
 
 #endif
+	if(METHODE == TDEA_MODE) len = 8;
+	else len = 16;
+
+#if 1
 	printf("K1 ");
-	for(i = 0; i < 8; i++) printf("%02X ", K_1[i]);
+	for(i = 0; i < len; i++) printf("%02X ", K_1[i]);
 	printf("\n");
 
 	printf("K2 ");
-	for(i = 0; i < 8; i++) printf("%02X ", K_2[i]);
+	for(i = 0; i < len; i++) printf("%02X ", K_2[i]);
 	printf("\n");
 
 	printf("binKey ");
@@ -403,38 +473,35 @@ void MACProcess(unsigned char *message, unsigned char METHODE, unsigned char *Ke
 
 	printf("Output ");
 	for(i = 0; i < lensrc; i++) printf("%02X ", output[i]);
+#endif
 	printf("\n");
-}
-
-void test() {
-	int i;
-	unsigned char key[24+1] = {0x8A,0xA8,0x3B,0xF8,0xCB,0xDA,0x10,0x62,0x0B,0xC1,0xBF,0x19,0xFB,0xB6,0xCD,0x58,0xBC,0x31,0x3D,0x4A,0x37,0x1C,0xA8,0xB5};
-	//unsigned char src[8+1] = {0x6B,0xC1,0xBE,0xE2,0x2E,0x40,0x9F,0x96};
-	//unsigned char src[8+1] = {0xE9,0x3D,0x7E,0x11,0x73,0x93,0x17,0x2A};
-	unsigned char src[8+1] = {0xAE,0x2D,0x8A,0x57,0x80,0x00,0x00,0x00};
-	unsigned char iv[8+1] = {0xDA,0xED,0xE0,0x62,0xDF,0xD9,0xE4,0x0F};
-	unsigned char K2[8+1] = {0x23,0x31,0xD3,0xA6,0x29,0xCC,0xA6,0xA5};
-
-	unsigned char output[8+1];
-
-//	memset(iv, 0x0, sizeof(iv));
-	for(i = 0; i < 8; i++) src[i] ^= K2[i];
-
-	for(i = 0; i < 8; i++) src[i] ^= iv[i];
-	
-	encryptDES_ECB(key, 24, src, output);
-	for(i = 0; i < 8; i++) printf("%02X ", output[i]);;
 
 }
+
 int main() {
 	unsigned long long int K1, K2;
+	unsigned char iv[16 + 1];
 //	unsigned char buffer[16 + 1] = "0000000000000000";
-//	unsigned char buffer[16 + 1] = "6bc1bee22e409f96";
+	unsigned char buffer[16 + 1] = "6bc1bee22e409f96";
+//	unsigned char buffer[40 + 1] = "6bc1bee22e409f96e93d7e117393172a";
 //	unsigned char buffer[40 + 1] = "6bc1bee22e409f96e93d7e117393172aae2d8a57";
-	unsigned char buffer[52 + 1] = "3D01000000120000010203040506070809101112131415161718";
+//	unsigned char buffer[52 + 1] = "3D01000000120000010203040506070809101112131415161718";
 //	unsigned char buffer[64 + 1] = "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51";
+//	unsigned char buffer[80 + 1] = "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411";
+//	unsigned char buffer[80 + 1] = "3d030000001500000102030405060708090a0b0c0d0e0f101112131415";
+//	unsigned char buffer[80 + 1] = "3d01000000120000010203040506070809101112131415161718";	//WRITE CMAC TDEA
+//	unsigned char buffer[80 + 1] = "";	//READ FULL ENCIPHERED TDEA
+//	unsigned char buffer[80 + 1] = "bd01000000120000";	//READ INTEGRITY TDEA
+//	unsigned char buffer[80 + 1] = "bd03000000150000";	//READ INTEGRITY AES
+//	unsigned char buffer[80 + 1] = "3d030000001500000102030405060708090a0b0c0d0e0f101112131415";	//WRITE INTEGRITY AES
+//	unsigned char buffer[128 + 1] = "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710";
+//	unsigned char buffer[52 + 1] = "BD00000000120000";
+	memset(iv, 0x0, sizeof(iv));
+//	 memcpy(iv, "\xAD\x37\x51\x6C\x10\x29\x64\x0E", 8);
+//      	memcpy(iv, "\xB2\x06\xE2\x3D\x30\x83\xEF\x51", 8);
+//      memcpy(iv, "\xA6\x58\x9D\xC8\xFC\x47\xD2\xE4\xF3\x7A\xF6\x45\xC3\xEB\xA0\x7D", 16);
 
-	MACProcess(buffer, TDEA_MODE, key);
+	MACProcess(buffer, TDEA_MODE, key, iv);
 
 	printf("\n");
 }
